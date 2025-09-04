@@ -3,7 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:path/path.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:plant_fit/action/edit_history_page.dart';
 import 'package:plant_fit/notification/notification_service.dart';
+import 'package:plant_fit/view/calendar_page.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:uuid/uuid.dart';
 import 'dart:async';
@@ -102,6 +104,7 @@ class WaterHistory {
       'plantId': plantId,
       'waterDate': waterDate.toIso8601String(),
       'notes': notes,
+      'imagePath': imagePath, // 新增
     };
   }
 
@@ -110,6 +113,7 @@ class WaterHistory {
       plantId: map['plantId'],
       waterDate: DateTime.parse(map['waterDate']),
       notes: map['notes'],
+      imagePath: map['imagePath'] ?? '', // 新增
     );
   }
 }
@@ -129,7 +133,7 @@ class DatabaseHelper {
     // String databasesPath = await getDatabasesPath();
     String path = join(documentsDirectory.path, 'plants.db');
     
-    var db = await openDatabase(path, version: 2, onCreate: _onCreate, onUpgrade: _onUpgrade);
+    var db = await openDatabase(path, version: 3, onCreate: _onCreate, onUpgrade: _onUpgrade);
     return db;
   }
 
@@ -169,6 +173,12 @@ class DatabaseHelper {
           notes TEXT,
           FOREIGN KEY (plantId) REFERENCES plants (id) ON DELETE CASCADE
         )
+      ''');
+    }
+    
+    if (newVersion >= 3) {
+      await db.execute('''
+        ALTER TABLE water_history ADD COLUMN imagePath TEXT;
       ''');
     }
   }
@@ -224,12 +234,20 @@ class DatabaseHelper {
     var dbClient = await db;
     List<Map> maps = await dbClient.query(
       'water_history',
-      columns: ['id', 'plantId', 'waterDate', 'notes'],
+      columns: ['id', 'plantId', 'waterDate', 'notes', 'imagePath'],
       where: 'plantId = ?',
       whereArgs: [plantId],
       orderBy: 'waterDate DESC',
     );
-    
+    return maps.map((map) => WaterHistory.fromMap(map)).toList();
+  }
+
+  Future<List<WaterHistory>> getWaterHistoryAll() async {
+    var dbClient = await db;
+    List<Map> maps = await dbClient.query(
+      'water_history',
+      columns: ['id', 'plantId', 'waterDate', 'notes', 'imagePath'],
+    );
     return maps.map((map) => WaterHistory.fromMap(map)).toList();
   }
 
@@ -241,6 +259,16 @@ class DatabaseHelper {
       whereArgs: [id],
     );
   }
+
+  Future<int> updateWaterHistory(WaterHistory history) async {
+  var dbClient = await db;
+  return await dbClient.update(
+    'water_history',
+    history.toMap(),
+    where: 'plantId = ?',
+    whereArgs: [history.plantId],
+  );
+}
 }
 
 // 主页面
@@ -253,12 +281,14 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   List<Plant> plants = [];
+  List<WaterHistory> waterHistory = [];
   DatabaseHelper dbHelper = DatabaseHelper();
 
   @override
   void initState() {
     super.initState();
     _loadPlants();
+    _loadWaterHistory();
   }
 
   _loadPlants() async {
@@ -268,11 +298,34 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  _loadWaterHistory() async {
+    List<WaterHistory> history = await dbHelper.getWaterHistoryAll();
+    setState(() {
+      waterHistory = history;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: Text('我的植物'),
+          actions: [
+            IconButton(
+              icon: Icon(Icons.calendar_today),
+              onPressed: () {
+                // 需要先获取所有浇水记录
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => CalendarPage(
+                      waterHistory: waterHistory, // 这里需要传递所有浇水记录
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
       ),
       body: plants.isEmpty
           ? Center(
@@ -639,9 +692,18 @@ class _PlantDetailPageState extends State<PlantDetailPage> {
                         subtitle: history.notes.isNotEmpty 
                             ? Text(history.notes) 
                             : null,
-                        trailing: IconButton(
-                          icon: Icon(Icons.delete, color: Colors.grey),
-                          onPressed: () => _deleteHistory(history.plantId),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: Icon(Icons.edit, color: Colors.grey),
+                              onPressed: () => _editHistory(history, context),
+                            ),
+                            IconButton(
+                              icon: Icon(Icons.delete, color: Colors.grey),
+                              onPressed: () => _deleteHistory(history.plantId),
+                            ),
+                          ]
                         ),
                       );
                     },
@@ -713,6 +775,22 @@ class _PlantDetailPageState extends State<PlantDetailPage> {
       },
     );
   }
+
+  // 添加编辑方法
+_editHistory(WaterHistory history, BuildContext context) async {
+  await Navigator.push(
+    context,
+    MaterialPageRoute(
+      builder: (context) => EditHistoryPage(
+        history: history,
+        onSave: (updatedHistory) async {
+          await dbHelper.updateWaterHistory(updatedHistory);
+          _loadWaterHistory();
+        },
+      ),
+    ),
+  );
+}
 
   _deleteHistory(String historyId) async {
     await dbHelper.deleteWaterHistory(historyId);
